@@ -1,7 +1,8 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { canonicalNodeKey, searchNodes, safeHttpUrl } = require('./static/node-search.js');
-const { filterSources, protocolCounts, sourceCsv, snapshotState } = require('./static/platform.js');
+const { canonicalNodeKey, searchNodes, safeHttpUrl, nodeValidation } = require('./static/node-search.js');
+const { filterSources, protocolCounts, sourceCsv, snapshotState, snapshotNotice, validationSummary, exportCounts } = require('./static/platform.js');
+const { sourceNodes } = require('./static/source.js');
 
 const encode = (value) => Buffer.from(value, 'utf8').toString('base64');
 const uriNode = (uri, overrides = {}) => ({
@@ -153,7 +154,7 @@ test('source protocol parsing and CSV export reject invalid counts and spreadshe
   const csv = sourceCsv([{ provider: '=HYPERLINK("https://evil.example")', available: false, nodes_total: 0, url: 'https://one.example/sub' }]);
   assert.ok(csv.startsWith('\uFEFF'));
   assert.ok(csv.includes('"\'=HYPERLINK(""https://evil.example"")"'));
-  assert.ok(csv.includes('"本次不可用","0"'));
+  assert.ok(csv.includes('"采集失败","0"'));
   assert.ok(csv.includes('"https://one.example/sub"'));
 });
 
@@ -163,4 +164,59 @@ test('snapshot state marks failed refresh and stale data honestly with UTC suffi
   assert.equal(snapshotState({ build_time_utc: '2026-10-09 05:00:00 UTC' }, now), 'historical');
   assert.equal(snapshotState({ stale: true, refresh_status: 'failed' }, now), 'stale');
   assert.equal(snapshotState({ stale: false, refresh_status: 'failed', nodes_total: 0 }, now), 'failed');
+});
+
+test('legacy collected node totals cannot imply verified connectivity or export counts', () => {
+  const health = { nodes_total: 35, protocol_counts: { vless: 35 }, region_counts: { hk: 35 }, yaml_nodes_total: 35, yaml_protocol_counts: { vless: 35 } };
+  const summary = validationSummary(health);
+  assert.equal(summary.status, 'not_run');
+  assert.equal(summary.collected, 35);
+  assert.equal(summary.verified, null);
+  assert.equal(summary.unverified, 35);
+  assert.deepEqual(exportCounts(health, 'passwall2'), { total: null, protocols: {}, regions: {} });
+  assert.deepEqual(exportCounts(health, 'clash'), { total: null, protocols: {}, regions: {} });
+});
+
+test('export quantities use passed nodes while YAML uses its supported passed subset', () => {
+  const health = {
+    nodes_total: 35, nodes_verified: 5, nodes_failed: 28, nodes_unverified: 2, published_nodes_total: 5,
+    validation: { status: 'completed', engine: 'mihomo', checked_at: '2026-10-12T06:00:00Z', vantage_point: '192.0.2.1', probe_urls: ['https://example.com/probe'], timeout_ms: 8000 },
+    protocol_counts: { vless: 35 }, region_counts: { hk: 35 },
+    verified_protocol_counts: { vless: 5 }, verified_region_counts: { hk: 5 },
+    yaml_nodes_total: 4, yaml_protocol_counts: { vless: 4 }, yaml_region_counts: { hk: 4 },
+  };
+  assert.deepEqual(exportCounts(health, 'passwall2'), { total: 5, protocols: { vless: 5 }, regions: { hk: 5 } });
+  assert.deepEqual(exportCounts(health, 'clash'), { total: 4, protocols: { vless: 4 }, regions: { hk: 4 } });
+  assert.equal(validationSummary(health).verified, 5);
+  assert.equal(validationSummary(health).failed, 28);
+  assert.equal(validationSummary(health).checked_at, health.validation.checked_at);
+});
+
+test('node validation distinguishes measured latency and unverified publication flags', () => {
+  assert.deepEqual(nodeValidation({ published: true }), { status: 'unverified', label: '未验证', latency_ms: null, checked_at: '', reason: '', published: false });
+  const passed = nodeValidation({ published: true, validation: { status: 'passed', latency_ms: 0, checked_at: '2026-10-12T06:00:00Z' } });
+  assert.equal(passed.label, '连通性通过');
+  assert.equal(passed.latency_ms, 0);
+  assert.equal(passed.published, true);
+  const failed = nodeValidation({ published: false, validation: { status: 'failed', latency_ms: 200, reason: 'timeout' } });
+  assert.equal(failed.label, '连通性失败');
+  assert.equal(failed.latency_ms, null);
+  assert.equal(failed.reason, 'timeout');
+  assert.equal(nodeValidation({ validation: { status: 'unsupported' } }).label, '验证器不支持');
+});
+
+test('source provenance includes collected failed nodes absent from published provider exports', () => {
+  const nodes = [
+    { id: 'passed', source_ids: ['abc'], published: true, validation: { status: 'passed' } },
+    { id: 'failed', source_ids: ['abc', 'other'], published: false, validation: { status: 'failed' } },
+    { id: 'unrelated', source_ids: ['other'] },
+  ];
+  assert.deepEqual(sourceNodes({ nodes }, 'abc'), nodes.slice(0, 2));
+  assert.deepEqual(sourceNodes({}, 'abc'), []);
+});
+
+test('stale refresh revokes validated exports while preserving prior collection provenance', () => {
+  const health = { stale: true, refresh_status: 'failed', nodes_total: 35, nodes_verified: 0, published_nodes_total: 5, verified_protocol_counts: { vless: 5 }, validation: { status: 'completed' } };
+  assert.equal(snapshotNotice(health), '上次采集记录仅供溯源，本次未能验证，已停止发布节点导出。');
+  assert.deepEqual(exportCounts(health, 'passwall2'), { total: null, protocols: {}, regions: {} });
 });

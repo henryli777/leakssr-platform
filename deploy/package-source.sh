@@ -7,9 +7,9 @@ fi
 source_dir=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$1/static/vendor" "$1/data" "$1/.github/workflows"
 target=$(cd "$1" && pwd)
-for name in LICENSE node_lookup.py platform_build.py platform_refresh.py \
+for name in LICENSE node_lookup.py node_validation.py clash_import.py platform_build.py platform_refresh.py \
     requirements-platform.txt test_node_lookup.py test_node_search.js \
-    test_platform_build.py test_platform_refresh.py DEPLOYMENT.md .gitignore; do
+    test_platform_build.py test_platform_refresh.py test_node_validation.py test_clash_import.py DEPLOYMENT.md .gitignore; do
     cp "$source_dir/$name" "$target/$name"
 done
 readme="$source_dir/PLATFORM_README.md"

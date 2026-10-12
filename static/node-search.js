@@ -202,6 +202,24 @@
     }
   }
 
+  function nodeValidation(node) {
+    const validation = node && node.validation && typeof node.validation === 'object' ? node.validation : {};
+    const labels = { passed: '连通性通过', failed: '连通性失败', unsupported: '验证器不支持', unverified: '未验证' };
+    const status = Object.hasOwn(labels, validation.status) ? validation.status : 'unverified';
+    return {
+      status, label: labels[status],
+      latency_ms: status === 'passed' && typeof validation.latency_ms === 'number' && Number.isFinite(validation.latency_ms) && validation.latency_ms >= 0 ? validation.latency_ms : null,
+      checked_at: typeof validation.checked_at === 'string' ? validation.checked_at : '',
+      reason: typeof validation.reason === 'string' ? validation.reason : '',
+      published: status === 'passed' && node.published === true,
+    };
+  }
+
+  function checkedAtLabel(value) {
+    const stamp = Date.parse(value);
+    return Number.isFinite(stamp) ? new Date(stamp).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC') : '未记录';
+  }
+
   function initialize(document) {
     const section = document.getElementById('node-search');
     if (!section) return;
@@ -250,7 +268,7 @@
       const row = element('li', 'node-search-source');
       const info = element('div', 'node-search-source-info');
       const label = element('div', 'node-search-source-label', source.provider || '订阅来源');
-      if (source.available === false) label.append(element('span', 'node-search-source-unavailable', '本次不可用'));
+      if (source.available === false) label.append(element('span', 'node-search-source-unavailable', '本次采集失败'));
       const originalUrl = typeof source.url === 'string' ? source.url : '';
       const url = safeHttpUrl(originalUrl);
       const address = element(url ? 'a' : 'span', 'node-search-source-url', originalUrl || '来源 ' + sourceId);
@@ -292,9 +310,18 @@
         const connection = element('div', 'node-search-connection');
         connection.append(element('span', 'node-search-protocol', String(node.protocol || '未知协议').toUpperCase()));
         connection.append(element('code', 'node-search-endpoint', formatEndpoint(node.server, node.port)));
-        if (node.published === false) connection.append(element('span', 'node-search-unpublished', '未进入聚合'));
+        const validation = nodeValidation(node);
+        connection.append(element('span', 'node-validation-badge ' + validation.status, validation.label));
+        if (!validation.published) connection.append(element('span', 'node-search-unpublished', '未进入导出'));
         heading.append(connection);
         row.append(heading);
+        const evidence = element('p', 'node-validation-evidence');
+        const details = [];
+        if (validation.latency_ms !== null) details.push('HTTP 探测延迟 ' + Math.round(validation.latency_ms) + ' ms');
+        if (validation.checked_at) details.push('验证于 ' + checkedAtLabel(validation.checked_at));
+        if (validation.reason) details.push(validation.reason);
+        evidence.textContent = details.join(' · ') || '尚无节点连通性实测记录';
+        row.append(evidence);
         const sourceIds = [...new Set(Array.isArray(node.source_ids) ? node.source_ids : [])];
         row.append(element('div', 'node-search-source-count', '原始订阅 ' + sourceIds.length));
         const sourceList = element('ul', 'node-search-source-list');
@@ -308,7 +335,8 @@
       previous.disabled = page === 1;
       next.disabled = page === totalPages;
       pageLabel.textContent = page + ' / ' + totalPages;
-      status.textContent = matches.length ? '找到 ' + matches.length + ' 个节点' : '未找到匹配节点';
+      const verified = matches.filter((node) => nodeValidation(node).status === 'passed').length;
+      status.textContent = matches.length ? '找到 ' + matches.length + ' 个已采集节点 · 连通性通过 ' + verified + ' 个' : index.nodes.length ? '未找到匹配的已采集节点' : '本次没有采集到节点，尚无可查询记录';
       status.classList.remove('node-search-error');
     }
 
@@ -379,8 +407,9 @@
     next.addEventListener('click', () => { page += 1; renderPage(); });
   }
 
-  const api = { canonicalNodeKey, searchNodes, safeHttpUrl, isUriQuery, formatEndpoint };
+  const api = { canonicalNodeKey, searchNodes, safeHttpUrl, isUriQuery, formatEndpoint, nodeValidation, checkedAtLabel };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  root.LeakSSRNodeSearch = api;
   if (root.document) {
     if (root.document.readyState === 'loading') root.document.addEventListener('DOMContentLoaded', () => initialize(root.document));
     else initialize(root.document);

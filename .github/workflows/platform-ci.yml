@@ -20,7 +20,7 @@ jobs:
         with:
           node-version: '22'
       - run: pip install -r requirements-platform.txt
-      - run: python -m unittest test_node_lookup test_platform_refresh test_platform_build
+      - run: python -m unittest discover
       - run: node --test test_node_search.js
       - run: python platform_build.py --output-dir dist
       - run: bash -n deploy/refresh-current.sh deploy/switch-release.sh deploy/install-release.sh

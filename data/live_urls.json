@@ -1,4 +1,22 @@
 [
+  {
+    "url": "https://raw.githubusercontent.com/free-nodes/v2rayfree/main/sub",
+    "provider": "free-nodes/v2rayfree",
+    "source": "github",
+    "first_seen": "2026-10-12"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/reachable/v2ray.txt",
+    "provider": "ermaozi/get_subscribe",
+    "source": "github",
+    "first_seen": "2026-10-12"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/free18/v2ray/main/v.txt",
+    "provider": "free18/v2ray",
+    "source": "github",
+    "first_seen": "2026-10-12"
+  },
   "https://088EA81A-3547-85E0-4AF6-DFCB3C6674AA.372372.xyz/api/v1/client/subscribe?token=d3065c795c0ea07c325756a2515708d9",
   "https://2.342242.icu/api/v1/client/subscribe?token=fdeba462f4d949718e7137dc6e6d78e8",
   "https://47.242.128.61:5000/api/v1/client/subscribe?token=09faa57f0d83377a19d5eb22fd26ba22",

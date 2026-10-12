@@ -23,7 +23,9 @@ import uuid
 import requests
 import yaml
 
-from node_lookup import add_node_name_aliases, build_node_index, parse_node_uri
+from node_lookup import add_node_name_aliases, build_node_index, canonical_node_key, parse_node_uri
+from node_validation import validate_nodes
+from clash_import import parse_clash_subscription
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -73,7 +75,7 @@ def load_sources(path):
 
 
 def parse_subscription(content):
-    """Accept raw or Base64 URI subscriptions; reject malformed URI entries."""
+    """Accept URI feeds or conservatively supported inline Clash proxies."""
     try:
         text = content.decode("utf-8-sig")
     except UnicodeError:
@@ -94,8 +96,9 @@ def parse_subscription(content):
             seen.add(line)
     if nodes:
         return nodes, "available"
-    if re.search(r"(?m)^\s*(?:proxies|proxy-providers)\s*:", text):
-        return [], "unsupported_format"
+    if re.search(r"(?m)^\s*(?:proxies|proxy-providers)\s*:", text) or text.lstrip().startswith("{"):
+        imported = parse_clash_subscription(text)
+        return (imported, "available") if imported else ([], "unsupported_format")
     return [], "invalid_payload"
 
 
@@ -179,6 +182,9 @@ def uri_to_clash_proxy(uri):
     proxy = {"name": parsed["name"], "type": protocol, "server": parsed["server"], "port": parsed["port"]}
     try:
         params = _params(config)
+        for key in ("udp", "tfo"):
+            if key in params:
+                proxy[key] = _boolean(params.pop(key))
         if protocol == "ss":
             if params:
                 return None
@@ -193,7 +199,7 @@ def uri_to_clash_proxy(uri):
                     proxy[target] = params[key]
         elif protocol == "vmess":
             vmess = config["config"]
-            if set(vmess) - {"id", "aid", "scy", "net", "tls", "type", "host", "path", "sni", "alpn", "fp", "allowInsecure"}:
+            if set(vmess) - {"id", "aid", "scy", "net", "tls", "type", "host", "path", "sni", "alpn", "fp", "allowInsecure", "udp", "tfo"}:
                 return None
             proxy.update(uuid=vmess["id"], alterId=vmess["aid"], cipher=vmess["scy"])
             _transport(proxy, vmess["net"], vmess.get("path", ""), vmess.get("host", ""),
@@ -209,6 +215,9 @@ def uri_to_clash_proxy(uri):
                 proxy["alpn"] = vmess["alpn"].split(",") if isinstance(vmess["alpn"], str) else vmess["alpn"]
             if "allowInsecure" in vmess:
                 proxy["skip-cert-verify"] = _boolean(vmess["allowInsecure"])
+            for key in ("udp", "tfo"):
+                if key in vmess:
+                    proxy[key] = _boolean(vmess[key])
         else:
             allowed = {"sni", "peer", "insecure", "allowInsecure", "alpn", "fp"}
             if protocol in {"vless", "trojan"}:
@@ -385,18 +394,21 @@ def _region(node):
     return matches[0] if len(matches) == 1 else "unknown"
 
 
-def _publish(output, source_nodes, metadata, index, proxies, converted):
+def _publish(output, source_nodes, metadata, index, proxies, converted, health):
     snapshots = output / ".platform-snapshots"
     snapshots.mkdir(exist_ok=True)
     generation = snapshots / uuid.uuid4().hex
     sub = generation / "sub"
     providers = sub / "providers"
     providers.mkdir(parents=True)
+    _atomic_json(sub / "health.json", health)
     _write_json(sub / "node_index.json", index)
     _write_json(sub / "url_meta.json", metadata)
-    nodes = [node["uri"] for node in index["nodes"]]
+    published = [node for node in index["nodes"] if node.get("published")]
+    published_keys = {key for node in published for key in node["match_keys"]}
+    nodes = [node["uri"] for node in published]
     (sub / "all.txt").write_text("\n".join(nodes) + ("\n" if nodes else ""), encoding="utf-8")
-    urls = [item["url"] for item in metadata if item["available"]]
+    urls = [item["url"] for item in metadata if item.get("nodes_verified", 0) > 0]
     (sub / "urls.txt").write_text("\n".join(urls) + ("\n" if urls else ""), encoding="utf-8")
     payload = yaml.safe_dump({"proxies": proxies}, allow_unicode=True, sort_keys=False)
     (sub / "all.yaml").write_text(payload, encoding="utf-8")
@@ -406,21 +418,34 @@ def _publish(output, source_nodes, metadata, index, proxies, converted):
         ("regions", {_region(node) for node in index["nodes"]}),
     ):
         for group in groups:
-            selected = [node for node in index["nodes"]
+            selected = [node for node in published
                         if (node["protocol"] if kind == "proto" else _region(node)) == group]
             uri_file = sub / "proto" / (group + ".txt") if kind == "proto" else sub / "regions" / group / "passwall2.txt"
             yaml_file = sub / "clash" / (group + ".yaml") if kind == "proto" else sub / "regions" / group / "clash.yaml"
             uri_file.parent.mkdir(parents=True, exist_ok=True)
             yaml_file.parent.mkdir(parents=True, exist_ok=True)
-            uri_file.write_text("\n".join(node["uri"] for node in selected) + "\n", encoding="utf-8")
+            uri_file.write_text("\n".join(node["uri"] for node in selected) + ("\n" if selected else ""), encoding="utf-8")
             yaml_file.write_text(yaml.safe_dump({"proxies": [converted[node["uri"]] for node in selected
                                                            if node["uri"] in converted]},
                                               allow_unicode=True, sort_keys=False), encoding="utf-8")
     for item in metadata:
-        sid, lines = item["id"], source_nodes[item["url"]]
+        sid = item["id"]
+        lines = [uri for uri in source_nodes.get(item["url"], []) if canonical_node_key(uri) in published_keys]
         _write_json(providers / (sid + ".json"), item)
         (providers / (sid + ".txt")).write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
     target = output / "sub"
+    health_path = output / "health.json"
+    if not health_path.is_symlink() or os.readlink(health_path) != "sub/health.json":
+        if target.exists() and health_path.exists():
+            _atomic_json(target / "health.json", _read_json(health_path, {}))
+        health_link = output / (".health-" + generation.name)
+        try:
+            health_link.symlink_to("sub/health.json")
+            os.replace(health_link, health_path)
+        finally:
+            if health_link.is_symlink():
+                health_link.unlink()
+    # health.json follows sub so the same pointer switches counts, index, and exports.
     previous = target.resolve() if target.is_symlink() else None
     link = output / (".sub-" + generation.name)
     link.symlink_to(sub.relative_to(output), target_is_directory=True)
@@ -445,10 +470,16 @@ def _publish(output, source_nodes, metadata, index, proxies, converted):
             shutil.rmtree(old)
 
 
-def refresh(output_dir, sources, *, workers=8, timeout=12, fetch=None):
-    """Publish one fetched snapshot, retaining a prior snapshot if all fail."""
+def refresh(output_dir, sources, *, workers=8, timeout=12, fetch=None, validator=None,
+            mihomo_binary="mihomo", check_timeout_ms=8000, check_workers=4,
+            vantage_point="unspecified"):
+    """Collect provenance, then publish only nodes that pass real proxy probes."""
     if not 1 <= workers <= 64 or timeout <= 0:
         raise ValueError("Workers must be 1..64 and timeout must be positive")
+    if (isinstance(check_timeout_ms, bool) or not isinstance(check_timeout_ms, int) or
+            not 1 <= check_timeout_ms <= 32767 or isinstance(check_workers, bool) or
+            not isinstance(check_workers, int) or not 1 <= check_workers <= 64):
+        raise ValueError("Check timeout must be 1..32767ms and check workers must be 1..64")
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     with (output / ".platform-refresh.lock").open("a") as lock:
@@ -456,17 +487,36 @@ def refresh(output_dir, sources, *, workers=8, timeout=12, fetch=None):
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError("Another refresh is already running") from None
-        return _refresh_locked(output, _source_entries(sources), workers, timeout, fetch or fetch_subscription)
+        return _refresh_locked(output, _source_entries(sources), workers, timeout, fetch or fetch_subscription,
+                               validator or validate_nodes, mihomo_binary, check_timeout_ms, check_workers,
+                               vantage_point)
 
 
-def _refresh_locked(output, entries, workers, timeout, fetch):
+def _refresh_locked(output, entries, workers, timeout, fetch, validator, mihomo_binary,
+                    check_timeout_ms, check_workers, vantage_point):
     now = datetime.now(timezone.utc)
     checked_at = now.isoformat(timespec="seconds")
     with ThreadPoolExecutor(max_workers=workers) as executor:
         results = list(executor.map(lambda entry: _fetch_source(entry, timeout, fetch, checked_at), entries))
     metadata = [meta for meta, nodes in results]
     source_nodes = {meta["url"]: nodes for meta, nodes in results}
-    index = build_node_index(source_nodes, metadata)
+    index = build_node_index(source_nodes, metadata, published_nodes=[])
+    alive = sum(item["available"] for item in metadata)
+    previous_health = {}
+    stale = False
+    if not alive:
+        previous_index = _read_json(output / "sub/node_index.json", {})
+        if previous_index.get("nodes"):
+            # Retain searchable origins, but never serve yesterday's successes as current.
+            index = previous_index
+            previous_health = _read_json(output / "health.json", {})
+            stale = True
+            for source in index.get("sources", {}).values():
+                source_nodes.setdefault(source["url"], [])
+            for node in index["nodes"]:
+                for sid in node["source_ids"]:
+                    if sid in index["sources"]:
+                        source_nodes[index["sources"][sid]["url"]].append(node["uri"])
     proxies, aliases, used_names, converted = [], {}, set(), {}
     for node in index["nodes"]:
         proxy = uri_to_clash_proxy(node["uri"])
@@ -481,7 +531,46 @@ def _refresh_locked(output, entries, workers, timeout, fetch):
         proxies.append(proxy)
         converted[node["uri"]] = proxy
     add_node_name_aliases(index, aliases)
-    alive = sum(item["available"] for item in metadata)
+    validation = {"status": "not_run", "engine": "mihomo", "checked_at": None,
+                  "probe_urls": ["https://www.gstatic.com/generate_204", "https://cp.cloudflare.com/generate_204"],
+                  "timeout_ms": check_timeout_ms, "vantage_point": vantage_point,
+                  "reason": "source_refresh_failed" if not alive else "no_nodes"}
+    node_results = {}
+    if alive:
+        try:
+            node_results, validation = validator(index["nodes"], converted, binary=mihomo_binary,
+                                                  timeout_ms=check_timeout_ms, workers=check_workers,
+                                                  vantage_point=vantage_point)
+        except Exception:
+            validation.update(status="unavailable", reason="checker_error")
+    for node in index["nodes"]:
+        node["validation"] = node_results.get(node["id"], {
+            "status": "unverified", "checked_at": None, "latency_ms": None,
+            "reason": validation.get("reason", "missing_test_result"),
+        })
+        result = node["validation"]
+        delay = result.get("latency_ms")
+        node["published"] = (validation.get("status") == "completed" and result.get("status") == "passed"
+                             and isinstance(delay, (int, float)) and not isinstance(delay, bool)
+                             and 0 < delay <= check_timeout_ms and node["uri"] in converted)
+        if result.get("status") == "passed" and not node["published"]:
+            result.update(status="unverified", reason="invalid_test_result", latency_ms=None)
+    verified = [node for node in index["nodes"] if node["published"]]
+    passed_uris = {node["uri"] for node in verified}
+    proxies = [converted[node["uri"]] for node in verified]
+    counts = Counter(node["validation"]["status"] for node in index["nodes"])
+    validation["counts"] = {status: counts.get(status, 0) for status in ("passed", "failed", "unsupported", "unverified")}
+    index["validation"] = validation
+    for item in metadata:
+        sid = item["id"]
+        collected = [node for node in index["nodes"] if sid in node["source_ids"]]
+        item["nodes_total"] = len(collected)
+        item["nodes_verified"] = sum(node["published"] for node in collected)
+        item["nodes_published"] = item["nodes_verified"]
+        item["nodes_failed"] = sum(node["validation"]["status"] == "failed" for node in collected)
+        if sid in index["sources"]:
+            index["sources"][sid].update(available=item["available"], nodes_total=item["nodes_total"],
+                                           nodes_verified=item["nodes_verified"], nodes_published=item["nodes_published"])
     failures = [{"id": item["id"], "status": item["status"], "http_status": item["http_status"]}
                 for item in metadata if not item["available"]]
     health = {
@@ -492,37 +581,28 @@ def _refresh_locked(output, entries, workers, timeout, fetch):
         "protocol_counts": dict(sorted(Counter(node["protocol"] for node in index["nodes"]).items())),
         "region_counts": dict(sorted(Counter(_region(node) for node in index["nodes"]).items())),
         "region_method": "subscription_label", "yaml_nodes_total": len(proxies),
-        "yaml_protocol_counts": dict(sorted(Counter(node["protocol"] for node in index["nodes"] if node["uri"] in converted).items())),
-        "yaml_region_counts": dict(sorted(Counter(_region(node) for node in index["nodes"] if node["uri"] in converted).items())),
-        "yaml_skipped_total": len(index["nodes"]) - len(proxies),
+        "yaml_protocol_counts": dict(sorted(Counter(node["protocol"] for node in verified).items())),
+        "yaml_region_counts": dict(sorted(Counter(_region(node) for node in verified).items())),
+        "yaml_skipped_total": len(index["nodes"]) - len(converted),
+        "nodes_verified": len(verified), "published_nodes_total": len(verified),
+        "nodes_failed": counts.get("failed", 0),
+        "nodes_unverified": counts.get("unverified", 0) + counts.get("unsupported", 0),
+        "verified_protocol_counts": dict(sorted(Counter(node["protocol"] for node in verified).items())),
+        "verified_region_counts": dict(sorted(Counter(_region(node) for node in verified).items())),
+        "source_validated": sum(item["nodes_verified"] > 0 for item in metadata),
+        "validation": validation,
         "refresh_status": "success" if alive and alive == len(entries) else "partial" if alive else "failed",
-        "refresh_failures": failures, "stale": False,
+        "refresh_failures": failures, "stale": stale,
     }
     next_run = now.replace(second=0, microsecond=0) + timedelta(minutes=30 - now.minute % 30)
     health.update(next_run_utc=next_run.isoformat(timespec="seconds"),
                   next_run_cn=next_run.astimezone(CN_TZ).isoformat(timespec="seconds"),
                   refresh_interval_seconds=1800, schedule_jitter_seconds=30)
-    if not alive:
-        previous_index = _read_json(output / "sub/node_index.json", {})
-        if previous_index.get("nodes"):
-            previous_health = _read_json(output / "health.json", {})
-            for key in ("build_time_utc", "build_time_cn", "yaml_nodes_total", "yaml_skipped_total", "region_counts", "yaml_protocol_counts", "yaml_region_counts"):
-                if key in previous_health:
-                    health[key] = previous_health[key]
-            if not previous_health.get("build_time_utc"):
-                generated = previous_index.get("generated_at")
-                health["build_time_utc"] = generated or "unknown"
-                health["build_time_cn"] = previous_health.get("build_time_cn", "unknown")
-            health["nodes_total"] = len(previous_index["nodes"])
-            health["protocol_counts"] = dict(sorted(Counter(node["protocol"] for node in previous_index["nodes"]).items()))
-            health["stale"] = True
-            health["snapshot_source_alive"] = sum(source.get("available", False)
-                                                  for source in previous_index.get("sources", {}).values())
-        else:
-            _publish(output, source_nodes, metadata, index, proxies, converted)
-    else:
-        _publish(output, source_nodes, metadata, index, proxies, converted)
-    _atomic_json(output / "health.json", health)
+    if stale:
+        health["build_time_utc"] = previous_health.get("build_time_utc") or index.get("generated_at", "unknown")
+        health["build_time_cn"] = previous_health.get("build_time_cn", "unknown")
+    _publish(output, source_nodes, metadata, index, proxies,
+             {uri: proxy for uri, proxy in converted.items() if uri in passed_uris}, health)
     return health
 
 
@@ -533,6 +613,10 @@ def main(argv=None):
     parser.add_argument("--workers", default=8, type=int)
     parser.add_argument("--timeout", default=12, type=float)
     parser.add_argument("--limit-sources", type=int)
+    parser.add_argument("--mihomo-binary", default="mihomo")
+    parser.add_argument("--check-timeout-ms", default=8000, type=int)
+    parser.add_argument("--check-workers", default=4, type=int)
+    parser.add_argument("--vantage-point", default="unspecified")
     args = parser.parse_args(argv)
     try:
         sources = _source_entries(load_sources(args.sources))
@@ -540,13 +624,19 @@ def main(argv=None):
             if args.limit_sources < 1:
                 parser.error("--limit-sources must be positive")
             sources = sources[:args.limit_sources]
-        health = refresh(args.output_dir, sources, workers=args.workers, timeout=args.timeout)
+        health = refresh(args.output_dir, sources, workers=args.workers, timeout=args.timeout,
+                         mihomo_binary=args.mihomo_binary, check_timeout_ms=args.check_timeout_ms,
+                         check_workers=args.check_workers, vantage_point=args.vantage_point)
     except (OSError, ValueError, RuntimeError):
         print("Refresh could not start: check source file, output permissions, and arguments.", file=sys.stderr)
         return 2
-    print("Refresh {}: {}/{} available sources, {} nodes, {} failures{}".format(
+    print("Refresh {}: {}/{} parsed sources, {} collected nodes, {} verified, {} source failures{}".format(
         health["refresh_status"], health["source_alive"], health["source_total"], health["nodes_total"],
+        health["nodes_verified"],
         len(health["refresh_failures"]), "; prior snapshot retained" if health["stale"] else ""))
+    if health["validation"]["status"] == "unavailable":
+        print("Proxy validation unavailable; no node exports published.", file=sys.stderr)
+        return 2
     return 1 if health["refresh_status"] == "failed" else 0
 
 

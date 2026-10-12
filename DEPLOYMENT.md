@@ -2,7 +2,7 @@
 
 Deploy the static platform to `leakssr.coinexo.top` on `43.108.37.222`.
 Nginx serves generated files; `platform_refresh.py` fetches the existing source
-list every 30 minutes. The refresh job needs no scraper API key or notification
+list every 30 minutes and validates nodes through a private Mihomo process. The refresh job needs no scraper API key or notification
 credential. Keep secrets, `.env`, repository history, development files, and
 unrelated applications out of the release and public directory.
 
@@ -24,7 +24,9 @@ unrelated applications out of the release and public directory.
 not writable by the service account. Only `public` and its private state directory
 are writable by the no-login `leakssr-refresh` user. Public directories use group
 `www-data` and the setgid bit so Nginx can read newly generated snapshots.
-Python publishes `health.json` with mode 0644; the service uses umask 0022.
+Python publishes `sub/health.json` with mode 0644; root `health.json` is a relative
+symlink to it so one snapshot switch publishes stats, index, and exports together.
+The service uses umask 0022.
 Do not chmod setgid directories from the restricted refresh service.
 
 Both refresh and release switching acquire the same persistent lock **before**
@@ -40,13 +42,13 @@ permissions keep every `app` and `venv` read-only to the service account.
 ## First Installation
 
 Run the following on the Ubuntu server as root. Nginx, Certbot, Python venv,
-rsync, and util-linux (`flock`) must be installed. This host already runs Nginx
+rsync, util-linux (`flock`), and a trusted Mihomo binary at `/usr/local/bin/mihomo` must be installed. The production engine is v1.19.29. This host already runs Nginx
 and other applications; use the new filenames below and preserve their vhosts.
 
 Upload a prepared release into
 `/opt/leakssr-platform/releases/<release-id>/app` and its built site into
 `.../public`. The refresh runtime requires only `platform_refresh.py`,
-`node_lookup.py`, `data/live_urls.json`, and the deployment files in `app`.
+`node_lookup.py`, `node_validation.py`, `clash_import.py`, `data/live_urls.json`, and the deployment files in `app`.
 Use a release ID containing letters, digits, `.`, `_`, or `-`, beginning with a
 letter or digit. The examples use `20261012-001`; choose a new ID per upload.
 
@@ -161,8 +163,33 @@ leakssr-platform-switch 20261012-001
 The switch helper waits up to 30 minutes for a running refresh. A scheduled
 refresh waits up to two minutes for a deployment lock, then reports failure if
 it cannot start. A fully failed source fetch returns a failed service status;
-when a prior snapshot exists, that snapshot remains available and health marks
-it stale. Partial successful refreshes publish a new snapshot.
+when a prior snapshot exists, its provenance remains searchable and health marks
+it stale, but its nodes become unverified and all node exports are emptied.
+Partial source successes publish a new snapshot containing only nodes that pass
+all HTTPS probes. Zero passed nodes is a legitimate result, not a publishing error.
+
+## Real Node Validation
+
+The refresh helper explicitly uses `/usr/local/bin/mihomo`, sixteen concurrent checks,
+8000ms per probe, and vantage point `43.108.37.222`. Each converted node must
+request both `https://www.gstatic.com/generate_204` and
+`https://cp.cloudflare.com/generate_204` through its own Mihomo proxy and obtain
+204. The controller delay value alone is insufficient: the checker also requires
+the per-URL `extra` status/history to confirm the expected HTTP status. Unsupported
+or failed nodes remain in the provenance index but not in TXT/YAML/provider exports.
+
+The checker uses a temporary private configuration, a random authenticated
+loopback-only controller, no proxy listener, no TUN, no system routing changes,
+and no user-supplied rules/providers. It removes inherited `CLASH_*` overrides
+and cleans up its process/configuration after every run. Do not reuse or stop
+Mihomo processes belonging to other applications. No controller is published.
+
+Missing engine, rejected configuration, startup failure, or unavailable validation
+publishes no nodes and returns a failing refresh status. One incompatible proxy
+can reject the shared core configuration and conservatively leave all candidates
+unverified. Do not substitute invented latency, direct requests, or TCP-only checks.
+Measured latency is not bandwidth and passing from this host at one time does not
+guarantee every user network/client/site will work.
 
 Keep the stable helper scripts, service units, Nginx snippet, and renewal hook
 installed under root ownership. Updating those infrastructure files requires

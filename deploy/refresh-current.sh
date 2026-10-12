@@ -27,7 +27,8 @@ status=0
 "$release/venv/bin/python" "$release/app/platform_refresh.py" \
     --output-dir "$release/public" \
     --sources "$release/app/data/live_urls.json" \
-    --workers 8 --timeout 12 || status=$?
+    --workers 8 --timeout 12 --mihomo-binary /usr/local/bin/mihomo \
+    --check-workers 16 --check-timeout-ms 8000 --vantage-point 43.108.37.222 || status=$?
 
 # Python publishes readable files directly. chmod on setgid directories is
 # rejected by RestrictSUIDSGID even when only read permissions are requested.

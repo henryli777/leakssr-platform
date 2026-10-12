@@ -25,6 +25,115 @@ else:
 class PlatformRefreshTest(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(refresh, "The server refresh module must exist")
+        # Refresh tests isolate fetching/publication; engine behavior has its own tests.
+        self.validation = patch.object(refresh, "validate_nodes", side_effect=self.passing_validation, create=True)
+        self.validation.start()
+        self.addCleanup(self.validation.stop)
+
+    @staticmethod
+    def passing_validation(nodes, converted, **kwargs):
+        checked = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        results = {node["id"]: {"status": "passed" if node["uri"] in converted else "unsupported",
+                                 "checked_at": checked, "latency_ms": 100 if node["uri"] in converted else None,
+                                 "reason": "https_probes_passed" if node["uri"] in converted else "unsupported_conversion"}
+                   for node in nodes}
+        return results, {"status": "completed", "engine": "mihomo", "checked_at": checked,
+                         "probe_urls": ["https://www.gstatic.com/generate_204", "https://cp.cloudflare.com/generate_204"],
+                         "timeout_ms": 8000, "vantage_point": "43.108.37.222"}
+
+    def test_only_connectivity_passed_nodes_enter_every_export(self):
+        urls = ["https://one.example/sub", "https://two.example/sub"]
+        good = "trojan://pass@good.example:443#HK"
+        failed = "trojan://pass@bad.example:443#JP"
+        unsupported = "ss://aes-128-gcm:pass@ss.example:443?plugin=unknown#US"
+        alias = good.replace("#HK", "#Hong%20Kong")
+        fetch = lambda url, timeout: refresh.FetchResult(
+            (good + "\n" + failed + "\n" + unsupported if url == urls[0] else alias).encode(), 200, {}, 1)
+
+        def validate(nodes, converted, **kwargs):
+            results, summary = self.passing_validation(nodes, converted, **kwargs)
+            for node in nodes:
+                if node["server"] == "bad.example":
+                    results[node["id"]].update(status="failed", latency_ms=None, reason="probe_failed")
+            return results, summary
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            health = refresh.refresh(root, urls, fetch=fetch, validator=validate)
+            self.assertEqual(health["nodes_total"], 3)
+            self.assertEqual(health["nodes_verified"], 1)
+            self.assertEqual(health["published_nodes_total"], 1)
+            self.assertEqual(health["nodes_failed"], 1)
+            self.assertEqual(health["nodes_unverified"], 1)
+            self.assertEqual(health["verified_protocol_counts"], {"trojan": 1})
+            self.assertEqual(health["yaml_nodes_total"], 1)
+            self.assertEqual(health["validation"]["counts"], {"passed": 1, "failed": 1, "unsupported": 1, "unverified": 0})
+            index = json.loads((root / "sub/node_index.json").read_text())
+            self.assertEqual(len(index["nodes"]), 3)
+            self.assertEqual(sum(node["published"] for node in index["nodes"]), 1)
+            self.assertEqual(len(next(node for node in index["nodes"] if node["server"] == "good.example")["source_ids"]), 2)
+            self.assertEqual((root / "sub/all.txt").read_text().strip(), good)
+            self.assertEqual((root / "sub/proto/trojan.txt").read_text().strip(), good)
+            self.assertEqual((root / "sub/proto/ss.txt").read_text(), "")
+            self.assertEqual((root / "sub/regions/jp/passwall2.txt").read_text(), "")
+            for path in root.joinpath("sub").rglob("*.txt"):
+                self.assertNotIn(failed, path.read_text())
+                self.assertNotIn(unsupported, path.read_text())
+            metadata = json.loads((root / "sub/url_meta.json").read_text())
+            self.assertEqual([item["nodes_total"] for item in metadata], [3, 1])
+            self.assertEqual([item["nodes_verified"] for item in metadata], [1, 1])
+            self.assertEqual([item["nodes_published"] for item in metadata], [1, 1])
+
+    def test_unavailable_checker_fails_closed_without_discarding_provenance(self):
+        uri = "trojan://pass@one.example:443#US"
+        fetch = lambda url, timeout: refresh.FetchResult(uri.encode(), 200, {}, 1)
+
+        def unavailable(nodes, converted, **kwargs):
+            return {}, {"status": "unavailable", "engine": "mihomo", "checked_at": None,
+                        "reason": "core_unavailable", "probe_urls": [], "vantage_point": "43.108.37.222"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            health = refresh.refresh(root, ["https://one.example/sub"], fetch=fetch, validator=unavailable)
+            self.assertEqual(health["nodes_total"], 1)
+            self.assertEqual(health["nodes_verified"], 0)
+            self.assertEqual(health["nodes_unverified"], 1)
+            self.assertEqual((root / "sub/all.txt").read_text(), "")
+            self.assertEqual(yaml.safe_load((root / "sub/all.yaml").read_text()), {"proxies": []})
+            node = json.loads((root / "sub/node_index.json").read_text())["nodes"][0]
+            self.assertFalse(node["published"])
+            self.assertEqual(node["validation"]["status"], "unverified")
+
+    def test_invalid_validation_options_fail_before_fetch(self):
+        for options in ({"check_timeout_ms": 0}, {"check_timeout_ms": 40000}, {"check_workers": 0},
+                        {"check_workers": 65}):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaises(ValueError):
+                    refresh.refresh(directory, [], **options)
+
+    def test_checker_exception_never_leaks_secret_or_publishes_nodes(self):
+        fetch = lambda url, timeout: refresh.FetchResult(b"trojan://pass@one.example:443", 200, {}, 1)
+        def broken(nodes, converted, **kwargs):
+            raise RuntimeError("sensitive-controller-secret")
+        with tempfile.TemporaryDirectory() as directory:
+            health = refresh.refresh(directory, ["https://one.example/sub"], fetch=fetch, validator=broken)
+            self.assertEqual(health["nodes_verified"], 0)
+            self.assertEqual(health["validation"]["reason"], "checker_error")
+            self.assertNotIn("sensitive-controller-secret", json.dumps(health))
+            self.assertEqual(Path(directory, "sub/all.txt").read_text(), "")
+
+    def test_health_write_failure_cannot_switch_exports_without_health(self):
+        uri = "trojan://pass@one.example:443"
+        good = lambda url, timeout: refresh.FetchResult(uri.encode(), 200, {}, 1)
+        bad = lambda url, timeout: refresh.FetchResult(b"Denied", 403, {}, 1)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = refresh.refresh(root, ["https://one.example/sub"], fetch=good)
+            with patch.object(refresh, "_atomic_json", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                refresh.refresh(root, ["https://one.example/sub"], fetch=bad)
+            self.assertEqual(json.loads((root / "health.json").read_text()), first)
+            self.assertEqual((root / "sub/all.txt").read_text().strip(), uri)
+            self.assertTrue(json.loads((root / "sub/node_index.json").read_text())["nodes"][0]["published"])
 
     def test_mixed_sources_export_one_snapshot_with_every_origin(self):
         urls = ["https://one.example/sub?token=one", "https://two.example/sub?token=two",
@@ -86,23 +195,28 @@ class PlatformRefreshTest(unittest.TestCase):
             self.assertEqual(proxies[1]["ws-opts"]["headers"], {"Host": "edge.example"})
             self.assertNotIn("secret token", json.dumps(health))
 
-    def test_all_failed_refresh_preserves_previous_snapshot_and_marks_stale(self):
+    def test_all_failed_refresh_keeps_provenance_but_revokes_old_exports(self):
         url = "https://one.example/sub"
         node = "trojan://pass@one.example:443#US"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             good = lambda url, timeout: refresh.FetchResult(node.encode(), 200, {}, 10)
             first = refresh.refresh(root, [url], fetch=good)
-            snapshot = {name: (root / "sub" / name).read_bytes()
-                        for name in ("all.txt", "node_index.json", "url_meta.json", "all.yaml")}
+            first_nodes = json.loads((root / "sub/node_index.json").read_text())["nodes"]
             bad = lambda url, timeout: refresh.FetchResult(b"Denied", 403, {}, 10)
             failed = refresh.refresh(root, [url], fetch=bad)
-            for name, body in snapshot.items():
-                self.assertEqual((root / "sub" / name).read_bytes(), body)
+            self.assertEqual((root / "sub/all.txt").read_text(), "")
+            self.assertEqual(yaml.safe_load((root / "sub/all.yaml").read_text()), {"proxies": []})
+            kept = json.loads((root / "sub/node_index.json").read_text())["nodes"]
+            self.assertEqual([node["id"] for node in kept], [node["id"] for node in first_nodes])
+            self.assertTrue(all(not node["published"] for node in kept))
+            self.assertTrue(all(node["validation"]["status"] == "unverified" for node in kept))
             self.assertEqual(failed["refresh_status"], "failed")
             self.assertTrue(failed["stale"])
             self.assertEqual(failed["source_alive"], 0)
             self.assertEqual(failed["nodes_total"], 1)
+            self.assertEqual(failed["nodes_verified"], 0)
+            self.assertEqual(failed["validation"]["status"], "not_run")
             self.assertEqual(failed["build_time_utc"], first["build_time_utc"])
             self.assertEqual(failed["refresh_failures"][0]["status"], "http_error")
             self.assertEqual(json.loads((root / "health.json").read_text()), failed)
@@ -165,6 +279,38 @@ class PlatformRefreshTest(unittest.TestCase):
         self.assertEqual(proxy["flow"], "xtls-rprx-vision")
         self.assertIsNone(refresh.uri_to_clash_proxy(uri.replace("type=grpc", "type=quic")))
         self.assertIsNone(refresh.uri_to_clash_proxy("ss://aes-128-gcm:pass@ss.example:443?plugin=unknown"))
+
+    def test_common_udp_and_fast_open_flags_are_retained_for_yaml_import(self):
+        uris = ["ss://aes-128-gcm:pass@ss.example:443?udp=true&tfo=false",
+                "trojan://pass@one.example:443?udp=0&tfo=1"]
+        for uri, udp, tfo in ((uris[0], True, False), (uris[1], False, True)):
+            with self.subTest(uri=uri):
+                proxy = refresh.uri_to_clash_proxy(uri)
+                self.assertIsNotNone(proxy)
+                self.assertEqual(proxy["udp"], udp)
+                self.assertEqual(proxy["tfo"], tfo)
+        vmess = {"add": "one.example", "port": 443, "id": "uuid", "udp": True, "tfo": False}
+        encoded = base64.b64encode(json.dumps(vmess).encode()).decode()
+        proxy = refresh.uri_to_clash_proxy("vmess://" + encoded)
+        self.assertIsNotNone(proxy)
+        self.assertTrue(proxy["udp"])
+        self.assertFalse(proxy["tfo"])
+        self.assertIsNone(refresh.uri_to_clash_proxy(uris[0].replace("udp=true", "udp=maybe")))
+
+    def test_inline_clash_sources_use_same_provenance_and_verification(self):
+        body = yaml.safe_dump({"proxies": [{"name": "HK", "type": "trojan", "server": "one.example",
+                                            "port": 443, "password": "secret", "udp": True}],
+                               "rules": ["MATCH,DIRECT"]}).encode()
+        fetch = lambda url, timeout: refresh.FetchResult(body, 200, {}, 1)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            health = refresh.refresh(root, ["https://one.example/clash"], fetch=fetch)
+            self.assertEqual(health["source_alive"], 1)
+            self.assertEqual(health["nodes_verified"], 1)
+            proxies = yaml.safe_load((root / "sub/all.yaml").read_text())["proxies"]
+            self.assertTrue(proxies[0]["udp"])
+            self.assertEqual(proxies[0]["password"], "secret")
+            self.assertNotIn("rules", yaml.safe_load((root / "sub/all.yaml").read_text()))
 
     def test_expired_subscription_is_not_available(self):
         expired = int(datetime.now(timezone.utc).timestamp()) - 100

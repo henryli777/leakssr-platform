@@ -20,6 +20,43 @@
     return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
   }
 
+  function validationSummary(health) {
+    const validation = health.validation && typeof health.validation === 'object' ? health.validation : {};
+    const status = ['completed', 'unavailable', 'not_run'].includes(validation.status) ? validation.status : 'not_run';
+    const collected = number(health.nodes_total);
+    const verified = number(health.nodes_verified);
+    const failed = number(health.nodes_failed);
+    return {
+      status, collected, verified, failed,
+      unverified: number(health.nodes_unverified) ?? (collected === null ? null : Math.max(0, collected - (verified ?? 0) - (failed ?? 0))),
+      checked_at: typeof validation.checked_at === 'string' ? validation.checked_at : '',
+      engine: typeof validation.engine === 'string' ? validation.engine : '',
+      vantage_point: typeof validation.vantage_point === 'string' ? validation.vantage_point : '',
+      probe_urls: Array.isArray(validation.probe_urls) ? validation.probe_urls.filter((url) => safeHttpUrl(url)) : [],
+      timeout_ms: number(validation.timeout_ms),
+    };
+  }
+
+  function exportCounts(health, format) {
+    if (health.stale === true || validationSummary(health).status !== 'completed') return { total: null, protocols: {}, regions: {} };
+    const counts = (value) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).filter(([, count]) => number(count) !== null)) : {};
+    return {
+      total: number(format === 'clash' ? health.yaml_nodes_total : health.published_nodes_total),
+      protocols: counts(format === 'clash' ? health.yaml_protocol_counts : health.verified_protocol_counts),
+      regions: counts(format === 'clash' ? health.yaml_region_counts : health.verified_region_counts),
+    };
+  }
+
+  function snapshotNotice(health, freshness = snapshotState(health)) {
+    const validation = validationSummary(health);
+    if (freshness === 'stale') return '上次采集记录仅供溯源，本次未能验证，已停止发布节点导出。';
+    if (freshness === 'failed') return '本次未能采集到节点，尚无可供导出的节点。';
+    if (freshness === 'sample') return '当前展示示例构建记录。';
+    if (freshness === 'historical') return '当前数据来自 ' + (health.build_time_cn || health.build_time_utc || '未记录时间') + '，已超过 48 小时。采集与验证状态来自历史构建。';
+    if (validation.status === 'unavailable') return '已采集节点来自真实订阅，本次验证器不可用，无法确认节点连通性。';
+    return validation.status !== 'completed' ? '已采集节点来自订阅解析结果，尚无节点连通性实测记录。' : '';
+  }
+
   function safeHttpUrl(value) {
     if (typeof value !== 'string' || !/^https?:\/\//i.test(value)) return null;
     try {
@@ -89,10 +126,10 @@
   }
 
   function sourceCsv(sources) {
-    const rows = [['来源', '状态', '节点数', '协议', '响应时间(ms)', '渠道', '发现日期', 'URL']];
+    const rows = [['来源', '采集状态', '已采集节点', '连通性通过', '已发布节点', '采集协议', '订阅响应时间(ms)', '渠道', '发现日期', 'URL']];
     sources.forEach((source) => rows.push([
-      sourceName(source), source.available === true ? '可用' : source.available === false ? '本次不可用' : '未知',
-      number(source.nodes_total) ?? '', Object.entries(protocolCounts(source)).map(([protocol, count]) => protocol + ':' + count).join(', '),
+      sourceName(source), source.available === true ? '采集成功' : source.available === false ? '采集失败' : '未知',
+      number(source.nodes_total) ?? '', number(source.nodes_verified) ?? '', number(source.nodes_published) ?? '', Object.entries(protocolCounts(source)).map(([protocol, count]) => protocol + ':' + count).join(', '),
       number(source.response_ms) ?? '', CHANNELS[sourceChannel(source)], source.first_seen || '', source.url || '',
     ]));
     return '\uFEFF' + rows.map((row) => row.map(csvValue).join(',')).join('\r\n');
@@ -159,8 +196,8 @@
     function statusBadge(source) {
       const available = source.available;
       const badge = element('span', 'badge ' + (available === true ? 'available' : available === false ? 'unavailable' : 'unknown'));
-      badge.append(icon(available === true ? 'circle-check' : available === false ? 'circle-minus' : 'circle-help'), document.createTextNode(available === true ? '可用' : available === false ? '不可用' : '未知'));
-      if (available === false) badge.title = '本次构建检测时不可用';
+      badge.append(icon(available === true ? 'circle-check' : available === false ? 'circle-minus' : 'circle-help'), document.createTextNode(available === true ? '采集成功' : available === false ? '采集失败' : '未知'));
+      badge.title = available === true ? '本次成功读取并解析订阅，节点连通性见实测结果' : available === false ? '本次未能读取或解析订阅' : '未记录本次采集结果';
       return badge;
     }
 
@@ -186,28 +223,45 @@
 
     function updateHealth(health) {
       state.health = health;
+      const validation = validationSummary(health);
       get('metric-nodes').textContent = format(health.nodes_total);
+      get('metric-verified').textContent = format(validation.verified);
+      get('metric-validation-status').textContent = validation.status === 'completed' ? '本次 HTTP 连通性实测通过' : validation.status === 'unavailable' ? '验证器不可用' : '尚未进行节点连通性验证';
       get('metric-alive').textContent = format(health.source_alive);
       get('metric-total').textContent = format(health.source_total);
       const nextTime = /T(\d{2}:\d{2})/.exec(health.next_run_cn || '');
-      get('metric-new').textContent = nextTime ? nextTime[1] : '—';
       const alive = number(health.source_alive);
       const total = number(health.source_total);
-      get('metric-availability').textContent = alive !== null && total !== null && total > 0 ? '构建时可用率 ' + (alive / total * 100).toFixed(1) + '%' : '构建时检测结果';
-      get('metric-removed').textContent = nextTime ? '每 30 分钟 · 北京时间' : '未提供定时计划';
+      get('metric-availability').textContent = alive !== null && total !== null && total > 0 ? '订阅读取与解析成功率 ' + (alive / total * 100).toFixed(1) + '%' : '订阅读取与解析结果';
       const stamp = typeof health.build_time_cn === 'string' ? health.build_time_cn : '';
       const parts = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/.exec(stamp);
       get('metric-build').textContent = parts ? parts[2] : '—';
       get('metric-date').textContent = parts ? parts[1] + ' · 北京时间' : '构建时间未提供';
       get('footer-update').textContent = stamp ? '数据更新于 ' + stamp.replace(/ CST$/, '') + ' UTC+8' : '构建时间未提供';
       get('export-build-time').textContent = stamp ? parts ? parts[1] + ' ' + parts[2] + ' 构建' : '构建输出' : '构建时间未提供';
-      get('search-index-count').textContent = number(health.nodes_total) !== null ? format(health.nodes_total) + ' 个聚合节点' : '';
+      get('search-index-count').textContent = number(health.nodes_total) !== null ? format(health.nodes_total) + ' 个已采集节点' : '';
       const freshness = snapshotState(health);
-      const labels = { current: health.refresh_status === 'partial' ? '部分来源可用' : '构建记录已载入', stale: '保留上次快照', failed: '本次刷新失败', sample: '示例构建记录', historical: '历史构建记录' };
+      const labels = { current: health.refresh_status === 'partial' ? '部分订阅采集成功' : '构建记录已载入', stale: '历史溯源记录', failed: '本次刷新失败', sample: '示例构建记录', historical: '历史构建记录' };
       get('snapshot-status').replaceChildren(element('span', 'status-dot' + (freshness !== 'current' ? ' muted' : '')), document.createTextNode(labels[freshness]));
       get('data-notice').classList.toggle('error', freshness === 'failed' || freshness === 'stale');
-      get('data-notice').hidden = freshness === 'current';
-      get('data-notice-text').textContent = freshness === 'stale' ? '最近一次刷新全部失败，继续提供上一份快照。来源清单与节点记录为上次成功采集结果。' : freshness === 'failed' ? '本次没有可用来源，尚无可供导出的节点。' : freshness === 'sample' ? '当前展示示例构建记录。' : freshness === 'historical' ? '当前数据来自 ' + (stamp || health.build_time_utc) + '，已超过 48 小时。可用状态为该次构建的检测结果。' : '';
+      get('data-notice').hidden = freshness === 'current' && validation.status === 'completed';
+      get('data-notice-text').textContent = snapshotNotice(health, freshness);
+      get('validation-status').textContent = validation.status === 'completed' ? '连通性实测已完成' : validation.status === 'unavailable' ? '验证器不可用' : '连通性尚未验证';
+      get('validation-counts').textContent = '通过 ' + format(validation.verified) + ' · 失败 ' + format(validation.failed) + ' · 未验证 / 不支持 ' + format(validation.unverified);
+      const evidence = [];
+      evidence.push('实测时间 ' + (validation.checked_at ? root.LeakSSRNodeSearch.checkedAtLabel(validation.checked_at) : '未记录'));
+      evidence.push('验证器 ' + (validation.engine || '未记录'));
+      evidence.push('测试位置 ' + (validation.vantage_point || '未记录'));
+      if (validation.timeout_ms !== null) evidence.push('超时 ' + format(validation.timeout_ms) + ' ms');
+      get('validation-evidence').textContent = evidence.join(' · ');
+      const probes = get('validation-probes');
+      probes.replaceChildren(document.createTextNode('HTTP 探测目标：'));
+      validation.probe_urls.forEach((url, index) => {
+        if (index) probes.append(document.createTextNode(' · '));
+        const link = element('a', '', url); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; probes.append(link);
+      });
+      if (!validation.probe_urls.length) probes.append(document.createTextNode('未记录'));
+      get('validation-schedule').textContent = nextTime ? '下次采集 ' + nextTime[1] + ' · 北京时间' : '采集计划未记录';
       renderDistributions();
       renderExports();
     }
@@ -270,6 +324,8 @@
         status.append(statusBadge(source));
         const nodeCount = element('td');
         nodeCount.append(element('span', 'table-number', format(source.nodes_total)));
+        const verifiedCount = element('td');
+        verifiedCount.append(element('span', 'table-number', format(source.nodes_verified)));
         const protocols = element('td');
         const counts = protocolCounts(source);
         Object.keys(counts).forEach((key) => { const badge = element('span', 'badge protocol', key.toUpperCase()); badge.title = format(counts[key]) + ' 个节点'; protocols.append(badge); });
@@ -291,7 +347,7 @@
           actionGroup.append(detail);
         }
         actions.append(actionGroup);
-        row.append(name, status, nodeCount, protocols, latency, channel, date, actions);
+        row.append(name, status, nodeCount, verifiedCount, protocols, latency, channel, date, actions);
         body.append(row);
       });
       get('source-results-status').textContent = state.sourceError ? '来源清单加载失败' : state.sourceLoaded ? '共 ' + format(state.sources.length) + ' 个来源 · 筛选结果 ' + format(rows.length) + ' 个' : '正在载入来源清单';
@@ -326,7 +382,9 @@
       rows.forEach((source) => {
         const row = element(SOURCE_ID.test(source.id || '') ? 'a' : 'div', 'compact-source-row');
         if (row.tagName === 'A') row.href = 'source.html?id=' + source.id;
-        row.append(element('span', 'compact-source-name', sourceName(source)), element('span', 'source-channel', CHANNELS[sourceChannel(source)]), element('span', 'compact-source-count', format(source.nodes_total) + ' 节点'), statusBadge(source));
+        const count = element('span', 'compact-source-count', format(source.nodes_verified) + ' 通过');
+        count.title = '已采集 ' + format(source.nodes_total) + ' 个节点';
+        row.append(element('span', 'compact-source-name', sourceName(source)), element('span', 'source-channel', CHANNELS[sourceChannel(source)]), count, statusBadge(source));
         recent.append(row);
       });
       if (!rows.length) recent.append(element('div', 'compact-source-row', state.sourceError ? '来源记录暂时无法载入' : '暂无来源记录'));
@@ -342,7 +400,7 @@
       refreshIcons();
     }
 
-    function exportRow(label, description, path, count, mark) {
+    function exportRow(label, description, path, count, mark, available = true) {
       const row = element('div', 'export-row');
       const badge = element('span', 'export-icon');
       badge.append(icon(mark || 'file-text'));
@@ -351,20 +409,23 @@
       const quantity = element('span', 'export-count', number(count) === null ? '—' : format(count) + ' 节点');
       const actions = element('div', 'export-actions');
       const url = new URL(path, document.baseURI).href;
-      actions.append(iconButton('copy', '复制 ' + label + ' 订阅链接', () => copy(url)));
+      const copyButton = iconButton('copy', '复制 ' + label + ' 订阅链接', () => copy(url));
+      copyButton.disabled = !available;
+      actions.append(copyButton);
       const open = element('a', 'icon-button');
-      open.href = url;
+      if (available) open.href = url;
       open.target = '_blank';
       open.rel = 'noopener noreferrer';
       open.title = '打开 ' + label;
       open.setAttribute('aria-label', '打开 ' + label);
       open.append(icon('external-link'));
       const download = element('a', 'icon-button');
-      download.href = url;
+      if (available) download.href = url;
       download.download = path.split('/').pop();
       download.title = '下载 ' + label;
       download.setAttribute('aria-label', '下载 ' + label);
       download.append(icon('download'));
+      [open, download].forEach((action) => { if (!available) { action.setAttribute('aria-disabled', 'true'); action.title = '尚无已验证节点可供导出'; } });
       actions.append(open, download);
       row.append(badge, info, quantity, actions);
       return row;
@@ -372,14 +433,16 @@
 
     function renderExports() {
       const health = state.health || {};
+      const uriCounts = exportCounts(health, 'passwall2');
+      const yamlCounts = exportCounts(health, 'clash');
       const aggregate = get('aggregate-exports');
       aggregate.replaceChildren(
-        exportRow('通用节点订阅', '原始节点 URI · all.txt', 'sub/all.txt', health.nodes_total, 'file-text'),
-        exportRow('Clash 节点 Provider', '节点集合 · all.yaml', 'sub/all.yaml', health.yaml_nodes_total, 'file-code-2'),
-        exportRow('原始订阅来源', '可用来源 URL · urls.txt', 'sub/urls.txt', null, 'link'),
+        exportRow('通用节点订阅', '连通性通过的节点 URI · all.txt', 'sub/all.txt', uriCounts.total, 'file-text', uriCounts.total > 0),
+        exportRow('Clash 节点 Provider', '连通性通过且支持 YAML 的节点 · all.yaml', 'sub/all.yaml', yamlCounts.total, 'file-code-2', yamlCounts.total > 0),
+        exportRow('含通过节点的订阅来源', '上游订阅可能同时包含未通过节点 · urls.txt', 'sub/urls.txt', null, 'link', uriCounts.total > 0),
       );
-      const protocolCounts = state.format === 'clash' ? health.yaml_protocol_counts : health.protocol_counts;
-      const protocols = protocolCounts && typeof protocolCounts === 'object' ? protocolCounts : {};
+      const selected = state.format === 'clash' ? yamlCounts : uriCounts;
+      const protocols = selected.protocols;
       const protocolTarget = get('protocol-exports');
       protocolTarget.replaceChildren();
       Object.keys(PROTOCOLS).forEach((key) => {
@@ -388,16 +451,15 @@
           protocolTarget.append(exportRow(PROTOCOLS[key], state.format === 'clash' ? 'Clash · YAML' : 'PassWall2 · 节点 URI', path, protocols[key], 'network'));
         }
       });
-      if (!protocolTarget.childNodes.length) protocolTarget.append(element('p', 'empty-copy', '暂无协议分类导出'));
-      const regionCounts = state.format === 'clash' ? health.yaml_region_counts : health.region_counts;
-      const regions = regionCounts && typeof regionCounts === 'object' ? regionCounts : {};
+      if (!protocolTarget.childNodes.length) protocolTarget.append(element('p', 'empty-copy', '本次没有可按协议导出的已验证节点'));
+      const regions = selected.regions;
       const regionTarget = get('region-exports');
       regionTarget.replaceChildren();
       Object.entries(regions).filter(([key, count]) => ['hk', 'jp', 'us', 'sg', 'tw', 'kr', 'uk', 'de', 'fr'].includes(key) && number(count) !== null && count > 0).sort((a, b) => b[1] - a[1]).forEach(([key, count]) => {
         const path = 'sub/regions/' + key + (state.format === 'clash' ? '/clash.yaml' : '/passwall2.txt');
         regionTarget.append(exportRow(REGIONS[key], state.format === 'clash' ? 'Clash · YAML' : 'PassWall2 · 节点 URI', path, count, 'map-pin'));
       });
-      if (!regionTarget.childNodes.length) regionTarget.append(element('p', 'empty-copy', '暂无地区分类导出'));
+      if (!regionTarget.childNodes.length) regionTarget.append(element('p', 'empty-copy', '本次没有可按地区导出的已验证节点'));
       refreshIcons();
     }
 
@@ -425,7 +487,14 @@
         get('data-notice').hidden = false;
         get('data-notice').classList.add('error');
         get('data-notice-text').textContent = state.health ? '构建数据刷新失败，保留上次载入的记录。' : '构建数据加载失败，请刷新后重试。';
-        if (!state.health) { renderDistributions(); renderExports(); get('footer-update').textContent = '构建数据暂时不可用'; }
+        if (!state.health) {
+          renderDistributions(); renderExports(); get('footer-update').textContent = '构建数据暂时不可用';
+          get('metric-validation-status').textContent = '未能载入实测记录';
+          get('validation-status').textContent = '验证记录不可用';
+          get('validation-counts').textContent = '验证结果未载入';
+          get('validation-evidence').textContent = '实测时间、验证器及测试位置未记录';
+          get('validation-probes').textContent = 'HTTP 探测目标：未记录';
+        }
       }
       state.sourceError = sources.status === 'rejected';
       if (sources.status === 'fulfilled') {
@@ -468,7 +537,7 @@
     loadData();
   }
 
-  const api = { safeHttpUrl, protocolCounts, sourceName, sourceChannel, filterSources, sourceCsv, number, snapshotState };
+  const api = { safeHttpUrl, protocolCounts, sourceName, sourceChannel, filterSources, sourceCsv, number, snapshotState, snapshotNotice, validationSummary, exportCounts };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (root.document) {
     if (root.document.readyState === 'loading') root.document.addEventListener('DOMContentLoaded', () => initialize(root.document));
