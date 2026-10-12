@@ -2,7 +2,7 @@
 
 公开订阅聚合与节点溯源工作台。正式部署地址：**[leakssr.coinexo.top](https://leakssr.coinexo.top/)**
 
-[GitHub](https://github.com/henryli777/leakssr-platform) · [部署说明](DEPLOYMENT.md) · [Apache-2.0](LICENSE)
+[GitHub](https://github.com/henryli777/leakssr-platform) · [部署说明](DEPLOYMENT.md) · [支持项目](https://support.coinexo.top/?project=leakssr) · [Apache-2.0](LICENSE)
 
 ![LeakSSR 平台界面](docs/platform-desktop.png)
 
