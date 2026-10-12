@@ -1,0 +1,30 @@
+name: Platform CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements-platform.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: pip install -r requirements-platform.txt
+      - run: python -m unittest test_node_lookup test_platform_refresh test_platform_build
+      - run: node --test test_node_search.js
+      - run: python platform_build.py --output-dir dist
+      - run: bash -n deploy/refresh-current.sh deploy/switch-release.sh deploy/install-release.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: platform-ui
+          path: dist

@@ -1,0 +1,39 @@
+[Unit]
+Description=Refresh LeakSSR subscription snapshot
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/opt/leakssr-platform/current/app/platform_refresh.py
+
+[Service]
+Type=oneshot
+User=leakssr-refresh
+Group=leakssr-refresh
+StateDirectory=leakssr-platform
+StateDirectoryMode=0750
+ExecStart=/usr/local/libexec/leakssr-platform-refresh
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+UMask=0022
+TimeoutStartSec=25min
+Nice=10
+MemoryMax=768M
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+# Root-owned app and venv remain read-only to this user. Allow every release
+# here so a current switch cannot leave a mount tied to the old public path.
+ReadWritePaths=/opt/leakssr-platform/releases /var/lib/leakssr-platform
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh LeakSSR every 30 minutes
+
+[Timer]
+OnCalendar=*-*-* *:00,30:00
+Persistent=true
+RandomizedDelaySec=30
+AccuracySec=1s
+Unit=leakssr-platform-refresh.service
+
+[Install]
+WantedBy=timers.target
