@@ -17,7 +17,7 @@ readme="$source_dir/PLATFORM_README.md"
 cp "$readme" "$target/README.md"
 cp "$source_dir/data/live_urls.json" "$target/data/live_urls.json"
 cp "$source_dir/.github/workflows/platform-ci.yml" "$target/.github/workflows/"
-for name in index.html.tpl styles.css node-search.css node-search.js platform.js source.html source.js; do
+for name in favicon.svg index.html.tpl styles.css node-search.css node-search.js platform.js source.html source.js; do
     cp "$source_dir/static/$name" "$target/static/$name"
 done
 cp "$source_dir/static/vendor/lucide.min.js" "$source_dir/static/vendor/LICENSE" "$target/static/vendor/"

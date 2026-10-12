@@ -18,4 +18,3 @@ class PlatformBuildTest(unittest.TestCase):
             self.assertFalse((root / "login.html").exists())
             self.assertFalse((root / "key_manager.html").exists())
             self.assertFalse((root / "data").exists())
-

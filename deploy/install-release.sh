@@ -18,7 +18,7 @@ if [[ ! -f /var/lib/leakssr-platform/deploy-refresh.lock ]]; then
     install -o leakssr-refresh -g leakssr-refresh -m 0640 /dev/null /var/lib/leakssr-platform/deploy-refresh.lock
 fi
 python3 -m venv "$release/venv"
-"$release/venv/bin/python" -m pip install -r "$release/app/requirements-platform.txt"
+"$release/venv/bin/python" -m pip install --index-url https://pypi.org/simple -r "$release/app/requirements-platform.txt"
 chown root:root "$release"
 chmod 0755 "$release"
 chown -R root:root "$release/app" "$release/venv"

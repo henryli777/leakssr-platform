@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#171f1d">
   <meta name="description" content="LeakSSR 订阅聚合运营平台：节点溯源、来源管理与订阅导出。">
   <title>LeakSSR · 订阅聚合运营平台</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="node-search.css">
   <script src="vendor/lucide.min.js" defer></script>

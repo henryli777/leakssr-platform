@@ -7,7 +7,7 @@ import shutil
 
 
 STATIC = Path(__file__).resolve().parent / "static"
-ASSETS = ("styles.css", "node-search.css", "node-search.js", "platform.js",
+ASSETS = ("favicon.svg", "styles.css", "node-search.css", "node-search.js", "platform.js",
           "source.html", "source.js", "vendor/lucide.min.js", "vendor/LICENSE")
 
 

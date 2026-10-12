@@ -23,8 +23,9 @@ unrelated applications out of the release and public directory.
 `app`, `venv`, the release directory, and `releases` must be owned by root and
 not writable by the service account. Only `public` and its private state directory
 are writable by the no-login `leakssr-refresh` user. Public directories use group
-`www-data` and the setgid bit so Nginx can read newly generated snapshots. The
-wrapper repairs group readability even when a failed refresh retains old data.
+`www-data` and the setgid bit so Nginx can read newly generated snapshots.
+Python publishes `health.json` with mode 0644; the service uses umask 0022.
+Do not chmod setgid directories from the restricted refresh service.
 
 Both refresh and release switching acquire the same persistent lock **before**
 resolving `current`. The lock is held for the whole refresh. Never replace or
@@ -62,7 +63,7 @@ test -f /var/lib/leakssr-platform/deploy-refresh.lock || \
     /var/lib/leakssr-platform/deploy-refresh.lock
 python3 -m venv "$LEAKSSR_RELEASE/venv"
 "$LEAKSSR_RELEASE/venv/bin/python" -m pip install \
-  -r "$LEAKSSR_RELEASE/app/deploy/requirements.txt"
+  --index-url https://pypi.org/simple -r "$LEAKSSR_RELEASE/app/requirements-platform.txt"
 chown root:root "$LEAKSSR_RELEASE"
 chmod 0755 "$LEAKSSR_RELEASE"
 chown -R root:root "$LEAKSSR_RELEASE/app" "$LEAKSSR_RELEASE/venv"
