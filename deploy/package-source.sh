@@ -22,4 +22,7 @@ for name in favicon.svg index.html.tpl styles.css node-search.css node-search.js
 done
 cp "$source_dir/static/vendor/lucide.min.js" "$source_dir/static/vendor/LICENSE" "$target/static/vendor/"
 cp -R "$source_dir/deploy" "$target/deploy"
+if [[ -d $source_dir/docs ]]; then
+    cp -R "$source_dir/docs" "$target/docs"
+fi
 printf 'Source package: %s\n' "$target"

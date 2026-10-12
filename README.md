@@ -4,6 +4,8 @@
 
 [GitHub](https://github.com/henryli777/leakssr-platform) · [部署说明](DEPLOYMENT.md) · [Apache-2.0](LICENSE)
 
+![LeakSSR 平台界面](docs/platform-desktop.png)
+
 ## 平台能力
 
 - 运行概览：可用来源、节点与协议分布、实际构建时间和失败状态。
