@@ -23,6 +23,7 @@
       <a href="#search" data-view-link="search"><i data-lucide="search" aria-hidden="true"></i><span>节点溯源</span></a>
       <a href="#sources" data-view-link="sources"><i data-lucide="radio-tower" aria-hidden="true"></i><span>订阅来源</span><span class="nav-count" id="nav-source-count">—</span></a>
       <a href="#exports" data-view-link="exports"><i data-lucide="download" aria-hidden="true"></i><span>导出中心</span></a>
+      <a class="nav-support" href="https://support.coinexo.top/?project=leakssr" target="_blank" rel="noopener noreferrer"><i data-lucide="heart" aria-hidden="true"></i><span>支持项目</span></a>
     </nav>
     <div class="sidebar-bottom">
       <a href="https://github.com/henryli777/leakssr-platform" target="_blank" rel="noopener noreferrer"><i data-lucide="github" aria-hidden="true"></i><span>项目仓库</span><i data-lucide="arrow-up-right" aria-hidden="true"></i></a>
@@ -71,7 +72,7 @@
     </main>
     <footer class="app-footer"><span>LeakSSR <span class="footer-divider">/</span> 公开订阅聚合</span><span id="footer-update">构建时间载入中</span><a href="https://support.coinexo.top/?project=leakssr" target="_blank" rel="noopener noreferrer">支持项目<i data-lucide="heart" aria-hidden="true"></i></a><a href="https://github.com/henryli777/leakssr-platform" target="_blank" rel="noopener noreferrer">GitHub<i data-lucide="arrow-up-right" aria-hidden="true"></i></a></footer>
   </div>
-  <nav class="mobile-nav" aria-label="移动端导航"><a href="#overview" data-view-link="overview" class="active" aria-current="page"><i data-lucide="layout-dashboard" aria-hidden="true"></i><span>概览</span></a><a href="#search" data-view-link="search"><i data-lucide="search" aria-hidden="true"></i><span>溯源</span></a><a href="#sources" data-view-link="sources"><i data-lucide="radio-tower" aria-hidden="true"></i><span>来源</span></a><a href="#exports" data-view-link="exports"><i data-lucide="download" aria-hidden="true"></i><span>导出</span></a></nav>
+  <nav class="mobile-nav" aria-label="移动端导航"><a href="#overview" data-view-link="overview" class="active" aria-current="page"><i data-lucide="layout-dashboard" aria-hidden="true"></i><span>概览</span></a><a href="#search" data-view-link="search"><i data-lucide="search" aria-hidden="true"></i><span>溯源</span></a><a href="#sources" data-view-link="sources"><i data-lucide="radio-tower" aria-hidden="true"></i><span>来源</span></a><a href="#exports" data-view-link="exports"><i data-lucide="download" aria-hidden="true"></i><span>导出</span></a><a class="nav-support" href="https://support.coinexo.top/?project=leakssr" target="_blank" rel="noopener noreferrer"><i data-lucide="heart" aria-hidden="true"></i><span>支持项目</span></a></nav>
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 </body>
 </html>

@@ -8,7 +8,7 @@ import shutil
 
 STATIC = Path(__file__).resolve().parent / "static"
 ASSETS = ("favicon.svg", "styles.css", "node-search.css", "node-search.js", "platform.js",
-          "source.html", "source.js", "vendor/lucide.min.js", "vendor/LICENSE")
+          "source.html", "source.js", "404.html", "error-page.js", "vendor/lucide.min.js", "vendor/LICENSE")
 
 
 def build_assets(output_dir):
