@@ -231,7 +231,6 @@
     const previous = document.getElementById('node-search-previous');
     const next = document.getElementById('node-search-next');
     const pageLabel = document.getElementById('node-search-page');
-    let indexPromise;
     let index;
     let matches = [];
     let page = 1;
@@ -349,29 +348,25 @@
       status.classList.toggle('node-search-error', Boolean(error));
     }
 
-    async function loadIndex() {
-      if (!indexPromise) {
-        indexPromise = root.fetch(new URL('sub/node_index.json', document.baseURI), { cache: 'no-cache' })
-          .then((response) => {
-            if (!response.ok) throw new Error('HTTP ' + response.status);
-            return response.json();
-          })
+    const indexCache = root.LeakSSRFreshness.createIndexCache(async () => {
+      const snapshot = await root.LeakSSRFreshness.readSnapshot(
+        () => root.LeakSSRFreshness.fetchData(new URL('health.json', document.baseURI)),
+        () => root.LeakSSRFreshness.fetchData(new URL('sub/node_index.json', document.baseURI))
           .then((data) => {
             if (!data || data.version !== 1 || !Array.isArray(data.nodes) || !data.sources || typeof data.sources !== 'object' || Array.isArray(data.sources)) {
               throw new Error('Invalid index');
             }
             return data;
-          })
-          .catch((error) => { indexPromise = undefined; throw error; });
-      }
-      return indexPromise;
-    }
+          }));
+      return snapshot.data;
+    });
 
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault();
+    let submittedQuery = '';
+    async function runSearch(preservePage = false) {
       const currentRequest = ++request;
       const query = input.value.trim();
-      page = 1;
+      submittedQuery = query;
+      if (!preservePage) page = 1;
       if (!query) {
         section.setAttribute('aria-busy', 'false');
         clearResults('尚未查询', false);
@@ -385,8 +380,9 @@
       clearResults('正在加载节点索引…', false);
       section.setAttribute('aria-busy', 'true');
       try {
-        index = await loadIndex();
+        const loaded = await indexCache.read();
         if (currentRequest !== request) return;
+        index = loaded;
         matches = searchNodes(index.nodes, query);
         renderPage();
       } catch (_) {
@@ -395,9 +391,20 @@
       } finally {
         if (currentRequest === request) section.setAttribute('aria-busy', 'false');
       }
+    }
+    form.addEventListener('submit', (event) => { event.preventDefault(); runSearch(); });
+    document.addEventListener('leakssr:snapshot', () => {
+      indexCache.invalidate();
+      ++request;
+      if (submittedQuery && input.value.trim() === submittedQuery) runSearch(true);
+      else if (submittedQuery) {
+        section.setAttribute('aria-busy', 'false');
+        clearResults('数据已更新，请重新搜索', false);
+      }
     });
     document.getElementById('node-search-clear').addEventListener('click', () => {
       input.value = '';
+      submittedQuery = '';
       ++request;
       section.setAttribute('aria-busy', 'false');
       clearResults('尚未查询', false);

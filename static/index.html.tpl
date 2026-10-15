@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="node-search.css">
   <script src="vendor/lucide.min.js" defer></script>
+  <script src="freshness.js" defer></script>
   <script src="node-search.js" defer></script>
   <script src="platform.js" defer></script>
 </head>

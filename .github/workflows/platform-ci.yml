@@ -21,7 +21,7 @@ jobs:
           node-version: '22'
       - run: pip install -r requirements-platform.txt
       - run: python -m unittest discover
-      - run: node --test test_node_search.js
+      - run: node --test test_node_search.js test_freshness.js
       - run: python platform_build.py --output-dir dist
       - run: bash -n deploy/refresh-current.sh deploy/switch-release.sh deploy/install-release.sh
       - uses: actions/upload-artifact@v4

@@ -6,14 +6,10 @@
   const CHANNELS = { google: 'Google', github: 'GitHub', telegram: 'Telegram', other: '其他 / 未记录' };
   const VIEWS = { overview: '运行概览', search: '节点溯源', sources: '订阅来源', exports: '导出中心' };
   const SOURCE_ID = /^[a-f0-9]{12}$/;
+  const freshnessApi = root.LeakSSRFreshness || require('./freshness.js');
 
   function snapshotState(health, now = Date.now()) {
-    if (health.stale === true) return 'stale';
-    if (health.refresh_status === 'failed') return 'failed';
-    if (health.sample_data === true || health.dataset_type === 'sample' || health.data_status === 'sample') return 'sample';
-    const stamp = String(health.build_time_utc || '').replace(/ UTC$/, '').replace(' ', 'T');
-    const date = Date.parse(/Z$|[+-]\d\d:\d\d$/.test(stamp) ? stamp : stamp + 'Z');
-    return Number.isFinite(date) && now - date > 48 * 3600000 ? 'historical' : 'current';
+    return freshnessApi.snapshotState(health, now);
   }
 
   function number(value) {
@@ -52,7 +48,8 @@
     if (freshness === 'stale') return '上次采集记录仅供溯源，本次未能验证，已停止发布节点导出。';
     if (freshness === 'failed') return '本次未能采集到节点，尚无可供导出的节点。';
     if (freshness === 'sample') return '当前展示示例构建记录。';
-    if (freshness === 'historical') return '当前数据来自 ' + (health.build_time_cn || health.build_time_utc || '未记录时间') + '，已超过 48 小时。采集与验证状态来自历史构建。';
+    if (freshness === 'historical') return '当前数据来自 ' + (health.build_time_cn || health.build_time_utc || '未记录时间') + '，已超过采集周期及运行宽限。采集与验证状态来自历史构建。';
+    if (freshness === 'unknown') return '数据时间未记录或无效，无法确认是否为最新快照。';
     if (validation.status === 'unavailable') return '已采集节点来自真实订阅，本次验证器不可用，无法确认节点连通性。';
     return validation.status !== 'completed' ? '已采集节点来自订阅解析结果，尚无节点连通性实测记录。' : '';
   }
@@ -241,7 +238,7 @@
       get('export-build-time').textContent = stamp ? parts ? parts[1] + ' ' + parts[2] + ' 构建' : '构建输出' : '构建时间未提供';
       get('search-index-count').textContent = number(health.nodes_total) !== null ? format(health.nodes_total) + ' 个已采集节点' : '';
       const freshness = snapshotState(health);
-      const labels = { current: health.refresh_status === 'partial' ? '部分订阅采集成功' : '构建记录已载入', stale: '历史溯源记录', failed: '本次刷新失败', sample: '示例构建记录', historical: '历史构建记录' };
+      const labels = { current: health.refresh_status === 'partial' ? '部分订阅采集成功' : '构建记录已载入', stale: '历史溯源记录', failed: '本次刷新失败', sample: '示例构建记录', historical: '历史构建记录', unknown: '数据时间未知' };
       get('snapshot-status').replaceChildren(element('span', 'status-dot' + (freshness !== 'current' ? ' muted' : '')), document.createTextNode(labels[freshness]));
       get('data-notice').classList.toggle('error', freshness === 'failed' || freshness === 'stale');
       get('data-notice').hidden = freshness === 'current' && validation.status === 'completed';
@@ -464,25 +461,32 @@
     }
 
     async function fetchJson(path, validator) {
-      const response = await root.fetch(new URL(path, document.baseURI), { cache: 'no-cache' });
-      if (!response.ok) throw new Error('HTTP ' + response.status);
-      const data = await response.json();
+      const data = await freshnessApi.fetchData(new URL(path, document.baseURI));
       if (!validator(data)) throw new Error('Invalid data');
       return data;
     }
 
+    let cachedSnapshot;
     async function loadData() {
       const request = ++state.request;
       get('refresh-data').disabled = true;
       get('refresh-data').classList.add('is-loading');
-      const results = await Promise.allSettled([
-        fetchJson('health.json', (data) => data && typeof data === 'object' && !Array.isArray(data)),
-        fetchJson('sub/url_meta.json', Array.isArray),
-      ]);
-      if (request !== state.request) return;
-      const [health, sources] = results;
-      if (health.status === 'fulfilled') updateHealth(health.value);
-      else {
+      try {
+        const snapshot = await freshnessApi.readSnapshot(
+          () => fetchJson('health.json', (data) => data && typeof data === 'object' && !Array.isArray(data)),
+          () => fetchJson('sub/url_meta.json', Array.isArray), cachedSnapshot);
+        if (request !== state.request) return;
+        const changed = !cachedSnapshot || freshnessApi.snapshotKey(snapshot.health) !== freshnessApi.snapshotKey(cachedSnapshot.health);
+        cachedSnapshot = snapshot;
+        updateHealth(snapshot.health);
+        state.sourceError = false;
+        state.sources = snapshot.data.filter((source) => source && typeof source === 'object' && !Array.isArray(source));
+        state.sourceLoaded = true;
+        renderSourceOverview();
+        renderSources();
+        if (changed) document.dispatchEvent(new root.CustomEvent('leakssr:snapshot'));
+      } catch (_) {
+        if (request !== state.request) return;
         get('snapshot-status').replaceChildren(element('span', 'status-dot muted'), document.createTextNode('构建数据不可用'));
         get('data-notice').hidden = false;
         get('data-notice').classList.add('error');
@@ -495,16 +499,14 @@
           get('validation-evidence').textContent = '实测时间、验证器及测试位置未记录';
           get('validation-probes').textContent = 'HTTP 探测目标：未记录';
         }
+        state.sourceError = true;
+        renderSources();
+      } finally {
+        if (request === state.request) {
+          get('refresh-data').disabled = false;
+          get('refresh-data').classList.remove('is-loading');
+        }
       }
-      state.sourceError = sources.status === 'rejected';
-      if (sources.status === 'fulfilled') {
-        state.sources = sources.value.filter((source) => source && typeof source === 'object' && !Array.isArray(source));
-        state.sourceLoaded = true;
-      }
-      renderSourceOverview();
-      renderSources();
-      get('refresh-data').disabled = false;
-      get('refresh-data').classList.remove('is-loading');
     }
 
     ['source-query', 'source-status', 'source-channel', 'source-protocol', 'source-sort'].forEach((id) => get(id).addEventListener(id === 'source-query' ? 'input' : 'change', () => { state.page = 1; renderSources(); }));
@@ -530,11 +532,11 @@
       document.querySelectorAll('[data-export-format]').forEach((item) => { const active = item === button; item.classList.toggle('active', active); item.setAttribute('aria-pressed', String(active)); });
       renderExports();
     }));
-    get('refresh-data').addEventListener('click', loadData);
+    const poller = freshnessApi.watch(document, loadData);
+    get('refresh-data').addEventListener('click', poller.refresh);
     root.addEventListener('hashchange', setView);
     setView();
     refreshIcons();
-    loadData();
   }
 
   const api = { safeHttpUrl, protocolCounts, sourceName, sourceChannel, filterSources, sourceCsv, number, snapshotState, snapshotNotice, validationSummary, exportCounts };

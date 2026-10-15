@@ -146,6 +146,14 @@ the LeakSSR certificate. The CSP expects scripts, fonts, and images to be local.
 
 ## Updates and Rollback
 
+Public overview and source pages read same-origin snapshots every 60 seconds
+while visible, and on foreground/online recovery. Health is read before and after
+changed payloads to detect an atomic snapshot switch; search caches are invalidated
+with the snapshot. These reads do not trigger collection. Requests have a 20-second
+deadline and retain successful data on refresh errors. A snapshot older than two
+30-minute cycles is labelled historical; missing/future times are unknown, not
+fresh. Runtime attempts and successful build/validation times remain distinct.
+
 Prepare a new release in a new directory, create its venv there, and apply the
 same root/app/venv and refresh/public ownership rules. Ensure its complete
 static snapshot is present before switching. Keep at least the preceding

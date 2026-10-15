@@ -3,6 +3,7 @@
   const SOURCE_ID = /^[a-f0-9]{12}$/;
   const CHANNELS = { google: 'Google', github: 'GitHub', telegram: 'Telegram' };
   const PROTOCOLS = { ss: 'Shadowsocks', ssr: 'ShadowsocksR', vmess: 'VMess', vless: 'VLESS', trojan: 'Trojan', hysteria2: 'Hysteria2' };
+  const freshness = root.LeakSSRFreshness || require('./freshness.js');
 
   function safeHttpUrl(value) {
     if (typeof value !== 'string' || !/^https?:\/\//i.test(value)) return null;
@@ -23,6 +24,11 @@
     const id = new URLSearchParams(root.location.search).get('id');
     let timer;
     const notices = [];
+    const current = { url: '', nodes: '' };
+    let cachedSnapshot;
+    let renderedKey;
+    let refreshFailed = false;
+    let hasData = false;
     const format = (value) => number(value) === null ? '—' : new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(value);
 
     function icons() { if (root.lucide && root.lucide.createIcons) root.lucide.createIcons({ attrs: { 'stroke-width': 1.7 } }); }
@@ -43,24 +49,40 @@
       } catch (_) { toast('复制失败，请选择内容后复制'); }
     }
     async function fetchData(path, type) {
-      const response = await root.fetch(new URL(path, document.baseURI), { cache: 'no-cache' });
-      if (!response.ok) throw new Error('HTTP ' + response.status);
-      return type === 'text' ? response.text() : response.json();
+      return freshness.fetchData(new URL(path, document.baseURI), { type });
     }
     icons();
     if (!SOURCE_ID.test(id || '')) { error('来源 ID 无效', '来源 ID 应为 12 位十六进制字符。请从来源清单重新打开详情。'); return; }
-    const results = await Promise.allSettled([
+    get('copy-source-url').addEventListener('click', () => copy(current.url));
+    get('copy-source-nodes').addEventListener('click', () => copy(current.nodes));
+    async function loadData() {
+    try {
+    const snapshot = await freshness.readSnapshot(() => fetchData('health.json'), () => Promise.allSettled([
       fetchData('sub/providers/' + id + '.json'),
       fetchData('sub/providers/' + id + '.txt', 'text'),
       fetchData('sub/url_meta.json'),
       fetchData('sub/node_index.json'),
-      fetchData('health.json'),
-    ]);
-    const [metadata, nodes, manifest, indexResult, healthResult] = results;
+    ]), cachedSnapshot);
+    const complete = snapshot.data.every((result) => result.status === 'fulfilled');
+    cachedSnapshot = complete ? snapshot : undefined;
+    const key = freshness.snapshotKey(snapshot.health) + freshness.snapshotState(snapshot.health);
+    if (complete && key === renderedKey && !refreshFailed) return;
+    renderedKey = complete ? key : undefined;
+    refreshFailed = false;
+    const [metadata, nodes, manifest, indexResult] = snapshot.data;
+    notices.length = 0;
+    get('source-notice').hidden = true;
+    get('source-error').hidden = true;
+    get('source-badge').replaceChildren();
+    get('copy-source-url').disabled = true;
+    get('copy-source-nodes').disabled = true;
+    get('download-source').hidden = true;
+    current.url = ''; current.nodes = '';
     const manifestRow = manifest.status === 'fulfilled' && Array.isArray(manifest.value) ? manifest.value.find((item) => item && typeof item === 'object' && item.id === id) : null;
     const provider = metadata.status === 'fulfilled' && metadata.value && typeof metadata.value === 'object' && !Array.isArray(metadata.value) ? metadata.value : null;
     const meta = provider ? { ...provider, ...(manifestRow || {}) } : manifestRow;
-    if (!meta) { error('来源详情暂不可用', '该来源未生成详情记录，或来源已从本次构建中移除。'); return; }
+    if (!meta) { get('source-detail').hidden = true; error('来源详情暂不可用', '该来源未生成详情记录，或来源已从本次构建中移除。'); return; }
+    hasData = true;
     const name = typeof meta.provider === 'string' && meta.provider ? meta.provider : typeof meta.host === 'string' && meta.host ? meta.host : '来源 ' + id;
     get('source-title').textContent = name;
     document.title = name + ' · LeakSSR';
@@ -69,7 +91,7 @@
     get('source-node-total').textContent = format(meta.nodes_total);
     const index = indexResult.status === 'fulfilled' ? indexResult.value : null;
     const collected = sourceNodes(index, id);
-    const health = healthResult.status === 'fulfilled' && healthResult.value && typeof healthResult.value === 'object' ? healthResult.value : {};
+    const health = snapshot.health;
     const validation = health.validation && typeof health.validation === 'object' ? health.validation : {};
     if (health.stale === true) notice('上次采集记录仅供溯源，本次未能验证，已停止发布节点导出。');
     const nodeApi = root.LeakSSRNodeSearch;
@@ -86,7 +108,7 @@
     const url = safeHttpUrl(meta.url);
     get('source-original-url').replaceChildren();
     const address = element(url ? 'a' : 'span', '', meta.url || '未提供订阅 URL');
-    if (url) { address.href = url; address.target = '_blank'; address.rel = 'noopener noreferrer'; get('copy-source-url').disabled = false; get('copy-source-url').addEventListener('click', () => copy(meta.url)); }
+    if (url) { address.href = url; address.target = '_blank'; address.rel = 'noopener noreferrer'; get('copy-source-url').disabled = false; current.url = meta.url; }
     get('source-original-url').append(address);
     const available = typeof manifestRow?.available === 'boolean' ? manifestRow.available : typeof meta.available === 'boolean' ? meta.available : null;
     get('source-badge').append(element('span', 'badge ' + (available === true ? 'available' : available === false ? 'unavailable' : 'unknown'), available === true ? '订阅采集成功' : available === false ? '本次订阅采集失败' : '采集状态未记录'));
@@ -139,7 +161,7 @@
       const lines = content.split(/\r?\n/).filter((line) => line.trim()).length;
       get('source-node-line-count').textContent = lines + ' 条记录';
       get('copy-source-nodes').disabled = !content.trim();
-      get('copy-source-nodes').addEventListener('click', () => copy(content));
+      current.nodes = content;
       get('download-source').hidden = false;
       get('download-source').href = 'sub/providers/' + id + '.txt';
       get('download-source').download = 'leakssr-source-' + id + '.txt';
@@ -150,11 +172,17 @@
       notice(canExport ? published > 0 ? '通过节点文件暂不可用。' : '该来源本次没有可供导出的验证通过节点。' : '来源采集记录已载入，尚无可确认的节点连通性结果。');
     }
     if (metadata.status === 'rejected') notice('当前展示来源清单中的记录，独立详情文件暂不可用。');
-    if (typeof meta.updated_at === 'string') {
-      const stamp = Date.parse(/Z$|[+-]\d\d:\d\d$/.test(meta.updated_at) ? meta.updated_at : meta.updated_at.replace(' ', 'T') + 'Z');
-      if (Number.isFinite(stamp) && Date.now() - stamp > 48 * 3600000) notice('该来源采集记录已超过 48 小时，逐节点验证时间见实测记录。');
-    }
+    const state = freshness.snapshotState(health);
+    if (state === 'historical') notice('该快照已超过采集周期及运行宽限，逐节点验证时间见实测记录。');
+    if (state === 'unknown') notice('数据时间未记录或无效，无法确认是否为最新快照。');
     icons();
+    } catch (_) {
+      refreshFailed = true;
+      if (hasData) notice('详情刷新失败，保留上次成功载入的记录；数据时间未变。');
+      else error('来源详情暂不可用', '详情数据未能载入，请稍后重试。');
+    }
+    }
+    freshness.watch(document, loadData);
   }
   if (typeof module !== 'undefined' && module.exports) module.exports = { safeHttpUrl, number, SOURCE_ID, sourceNodes };
   if (root.document) {
